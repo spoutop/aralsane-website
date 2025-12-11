@@ -8,6 +8,21 @@ interface Message {
   text: string;
 }
 
+// Minimal markdown-to-HTML (bold/italic/code/links) with escaping to avoid HTML injection.
+const markdownToHtml = (text: string) => {
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  return escaped
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code class="px-1 py-0.5 bg-white\\/10 rounded">$1</code>')
+    .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" class="text-cyan-300 underline" target="_blank" rel="noopener noreferrer">$1</a>')
+    .replace(/\n/g, '<br/>');
+};
+
 export const GeminiChat: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
@@ -16,6 +31,7 @@ export const GeminiChat: React.FC = () => {
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const apiKeyRef = useRef<string | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -24,6 +40,37 @@ export const GeminiChat: React.FC = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages, isOpen]);
+
+  const resolveApiKey = async () => {
+    // Priority 1: Vite env (set VITE_GEMINI_API_KEY in .env when building)
+    if (import.meta.env.VITE_GEMINI_API_KEY) {
+      apiKeyRef.current = import.meta.env.VITE_GEMINI_API_KEY;
+      return apiKeyRef.current;
+    }
+
+    // Priority 2: global set in a file (e.g., add <script>window.__GEMINI_API_KEY__='key'</script> or ship public/gemini-key.js)
+    const maybeWindowKey = (window as any).__GEMINI_API_KEY__ as string | undefined;
+    if (maybeWindowKey) {
+      apiKeyRef.current = maybeWindowKey;
+      return apiKeyRef.current;
+    }
+
+    // Priority 3: optional text file placed at /gemini-key.txt with just the key
+    try {
+      const res = await fetch('/gemini-key.txt', { cache: 'no-store' });
+      if (res.ok) {
+        const text = (await res.text()).trim();
+        if (text) {
+          apiKeyRef.current = text;
+          return apiKeyRef.current;
+        }
+      }
+    } catch {
+      // ignore fetch errors; we'll surface a friendly message below
+    }
+
+    return null;
+  };
 
   const handleSend = async () => {
     if (!inputText.trim()) return;
@@ -34,26 +81,30 @@ export const GeminiChat: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const apiKey = process.env.API_KEY;
+      const apiKey = apiKeyRef.current ?? await resolveApiKey();
       if (!apiKey) {
-        throw new Error("API Key not found");
+        throw new Error("API Key not found. Please set VITE_GEMINI_API_KEY or provide /gemini-key.txt or window.__GEMINI_API_KEY__.");
       }
 
       const ai = new GoogleGenAI({ apiKey });
       
-      // System context for the bot about ARSG
+      // System context for the bot about ARSG (formatted for clarity)
       const systemContext = `
-        You are a helpful assistant for Abdul Razzaq Al-Sane & Sons Group (ARSG).
-        Key Info:
-        - Established: 1948 by Late Abdul Razzaq Al-Sane.
-        - Sectors: Real Estate, Water & Beverages (Abraj Water), Education, Hospitality.
-        - Chairman & CEO: Mr. Jameel Abdul Razzaq Al-Sane.
-        - Values: Excellence, Legacy, Sustainability.
-        Keep answers professional, concise, and related to the company.
-      `;
+You are a helpful assistant for Abdul Razzaq Al-Sane & Sons Group (ARSG).
+
+Key facts:
+- Founded: 1948 by the Late Abdul Razzaq Al-Sane
+- Leadership: Chairman & CEO — Mr. Jameel Abdul Razzaq Al-Sane
+- Sectors: Real Estate, Water & Beverages (Abraj Water), Education, Hospitality
+- Values: Excellence · Legacy · Sustainability
+
+Guidelines:
+- Keep responses concise, professional, and relevant to ARSG.
+- If unsure or out of scope, ask for clarification or direct to official channels.
+      `.trim();
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-2.5-flash-lite-preview-09-2025',
         contents: [
             { role: 'user', parts: [{ text: systemContext + "\nUser Question: " + userMessage }] }
         ],
@@ -96,16 +147,24 @@ export const GeminiChat: React.FC = () => {
           <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-brand-dark/50">
             {messages.map((msg, idx) => (
               <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div 
-                  className={`
-                    max-w-[80%] rounded-2xl p-3 text-sm
-                    ${msg.role === 'user' 
-                      ? 'bg-cyan-600 text-white rounded-tr-none' 
-                      : 'bg-white/10 text-gray-200 rounded-tl-none border border-white/5'}
-                  `}
-                >
-                  {msg.text}
-                </div>
+                {msg.role === 'model' ? (
+                  <div
+                    className={`
+                      max-w-[80%] rounded-2xl p-3 text-sm
+                      bg-white/10 text-gray-200 rounded-tl-none border border-white/5
+                    `}
+                    dangerouslySetInnerHTML={{ __html: markdownToHtml(msg.text) }}
+                  />
+                ) : (
+                  <div 
+                    className={`
+                      max-w-[80%] rounded-2xl p-3 text-sm
+                      bg-cyan-600 text-white rounded-tr-none
+                    `}
+                  >
+                    {msg.text}
+                  </div>
+                )}
               </div>
             ))}
             {isLoading && (
